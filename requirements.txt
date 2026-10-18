@@ -1,2 +1,4 @@
 pyTelegramBotAPI
 requests
+duckduckgo-search
+beautifulsoup4
