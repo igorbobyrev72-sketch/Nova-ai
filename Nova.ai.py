@@ -62,39 +62,46 @@ def is_allowed(m):
 def search_and_fetch(query):
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
+            results = list(ddgs.text(query, max_results=5))
         
         context = ""
         for res in results:
             url = res['href']
             title = res['title']
             try:
-                page = requests.get(url, timeout=10)
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                page = requests.get(url, headers=headers, timeout=10)
                 soup = BeautifulSoup(page.text, 'html.parser')
-                for script in soup(["script", "style"]):
-                    script.decompose()
+                
+                for tag in soup(["script", "style", "nav", "footer", "header"]):
+                    tag.decompose()
+                
                 text = soup.get_text(separator=' ', strip=True)
-                context += f"\n--- Источник: {title} ({url}) ---\n{text[:2000]}\n"
-            except:
+                context += f"\n--- Источник: {title} ({url}) ---\n{text[:4000]}\n"
+            except Exception as e:
+                print(f"Ошибка парсинга {url}: {e}")
                 pass
         return context
     except Exception as e:
-        return None
+        return f"Ошибка поиска: {e}"
 
 def ask_groq(user_id, text, context=""):
     history = user_histories.get(user_id, [])
-    history.append({"role": "user", "content": text})
+    
+    if context:
+        prompt = f"Запрос: {text}\n\nКонтекст из интернета:\n{context}\n\nНа основе этого напиши ответ или рабочий код. Без воды."
+        history.append({"role": "user", "content": prompt})
+    else:
+        history.append({"role": "user", "content": text})
+        
     if len(history) > 10:
         history = history[-10:]
-    
+        
     role = user_roles.get(user_id, "Обычный")
     if role == "Дебаггер":
         sys_prompt = "Ты — сеньор-разработчик. Найди ошибку, объясни и выдай исправленный код."
     else:
         sys_prompt = "Ты полезный помощник. Пиши код, если просят."
-    
-    if context:
-        sys_prompt += f"\n\nИспользуй эту инфу из интернета для ответа:\n{context}"
 
     messages = [{"role": "system", "content": sys_prompt}] + history
     current_model = user_models.get(user_id, MODEL)
@@ -139,7 +146,7 @@ def start(m):
     user_models[m.chat.id] = MODEL
     send_code_files[m.chat.id] = False
     user_roles[m.chat.id] = "Обычный"
-    bot.reply_to(m, "Здарова. Пиши задачу. Если надо — я поищу в инете и напишу код.", reply_markup=get_main_keyboard(m.chat.id))
+    bot.reply_to(m, "Здарова. Скинь задачу или юзай `/web` для поиска в инете.", reply_markup=get_main_keyboard(m.chat.id))
 
 @bot.message_handler(commands=["web"])
 def web_search(m):
@@ -148,16 +155,17 @@ def web_search(m):
     if not query:
         bot.reply_to(m, "А запрос где?")
         return
-    tmp = bot.reply_to(m, "Ищу в инете и думаю...")
+    tmp = bot.reply_to(m, "Ищу в инете, читаю сайты...")
+    
     context = search_and_fetch(query)
-    if not context:
-        bot.edit_message_text("Не смог ничего найти в инете.", m.chat.id, tmp.message_id)
+    if not context or context.startswith("Ошибка"):
+        bot.edit_message_text(f"Обосрался с поиском: {context}", m.chat.id, tmp.message_id)
         return
     
     try:
-        ans = ask_groq(m.chat.id, f"На основе этого контекста ответь на запрос: {query}", context)
+        ans = ask_groq(m.chat.id, query, context)
     except Exception as e:
-        bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
+        bot.edit_message_text(f"Ошибка Groq: {e}", m.chat.id, tmp.message_id)
         return
 
     if send_code_files.get(m.chat.id, False):
