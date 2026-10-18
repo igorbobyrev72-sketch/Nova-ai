@@ -61,29 +61,26 @@ def is_allowed(m):
 
 def search_and_fetch(query):
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
-        
+        results = DDGS().text(query, max_results=3, region='ru-ru')
         context = ""
         for res in results:
-            url = res['href']
-            title = res['title']
+            url = res.get('href')
+            title = res.get('title')
+            if not url: continue
             try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                page = requests.get(url, headers=headers, timeout=10)
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                page = requests.get(url, headers=headers, timeout=5)
                 soup = BeautifulSoup(page.text, 'html.parser')
-                
                 for tag in soup(["script", "style", "nav", "footer", "header"]):
                     tag.decompose()
-                
                 text = soup.get_text(separator=' ', strip=True)
-                context += f"\n--- Источник: {title} ({url}) ---\n{text[:4000]}\n"
-            except Exception as e:
-                print(f"Ошибка парсинга {url}: {e}")
+                context += f"--- {title} ({url}) ---\n{text[:3000]}\n\n"
+            except Exception:
                 pass
-        return context
+        return context if context else None
     except Exception as e:
-        return f"Ошибка поиска: {e}"
+        print(f"Поиск сдох: {e}")
+        return None
 
 def ask_groq(user_id, text, context=""):
     history = user_histories.get(user_id, [])
@@ -101,7 +98,12 @@ def ask_groq(user_id, text, context=""):
     if role == "Дебаггер":
         sys_prompt = "Ты — сеньор-разработчик. Найди ошибку, объясни и выдай исправленный код."
     else:
-        sys_prompt = "Ты полезный помощник. Пиши код, если просят."
+        sys_prompt = (
+            "Ты полезный помощник. Отвечай кратко и по делу. "
+            "Если пользователь просит создать файл или спрашивает, умеешь ли ты это делать, "
+            "отвечай, что для создания .txt файла нужно использовать команду /txt [твой текст или тема]. "
+            "Не пиши код в блоке ```, если тебя об этом не просят напрямую!"
+        )
 
     messages = [{"role": "system", "content": sys_prompt}] + history
     current_model = user_models.get(user_id, MODEL)
@@ -146,7 +148,27 @@ def start(m):
     user_models[m.chat.id] = MODEL
     send_code_files[m.chat.id] = False
     user_roles[m.chat.id] = "Обычный"
-    bot.reply_to(m, "Здарова. Скинь задачу или юзай `/web` для поиска в инете.", reply_markup=get_main_keyboard(m.chat.id))
+    bot.reply_to(m, "Здарова. Скинь задачу или юзай `/web` для поиска в инете.\n\nУмею делать `.txt` файлы через команду `/txt [тема или текст]`.", reply_markup=get_main_keyboard(m.chat.id))
+
+@bot.message_handler(commands=["txt"])
+def gen_txt(m):
+    if not is_allowed(m): return
+    prompt = m.text.replace("/txt", "").strip()
+    if not prompt:
+        bot.reply_to(m, "А текст или тема где, хули?")
+        return
+
+    tmp = bot.reply_to(m, "Пишу файл...")
+    try:
+        ans = ask_groq(m.chat.id, prompt)
+        file_data = ans.encode('utf-8')
+        doc = io.BytesIO(file_data)
+        doc.name = "response.txt"
+        
+        bot.delete_message(m.chat.id, tmp.message_id)
+        bot.send_document(m.chat.id, doc, caption="Держи файл.")
+    except Exception as e:
+        bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
 @bot.message_handler(commands=["web"])
 def web_search(m):
@@ -155,11 +177,11 @@ def web_search(m):
     if not query:
         bot.reply_to(m, "А запрос где?")
         return
-    tmp = bot.reply_to(m, "Ищу в инете, читаю сайты...")
+    tmp = bot.reply_to(m, "Ищу...")
     
     context = search_and_fetch(query)
-    if not context or context.startswith("Ошибка"):
-        bot.edit_message_text(f"Обосрался с поиском: {context}", m.chat.id, tmp.message_id)
+    if not context:
+        bot.edit_message_text("Поисковик забанил запрос, сука. Попробуй позже или напиши без /web.", m.chat.id, tmp.message_id)
         return
     
     try:
