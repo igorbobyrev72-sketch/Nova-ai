@@ -2,6 +2,7 @@ import os
 import threading
 import requests
 import telebot
+import io
 
 from http.server import (
     BaseHTTPRequestHandler,
@@ -59,37 +60,26 @@ def ask_groq(user_id, text):
 @bot.message_handler(commands=["start"])
 def start(m):
     user_histories[m.chat.id] = []
-    bot.reply_to(m, "Привет. Скинь задачу, текст или .txt файл.")
+    bot.reply_to(m, "Привет. Скинь задачу. Если надо файлом — пиши: /txt твой запрос")
 
-@bot.message_handler(content_types=["document"])
-def handle_doc(m):
-    if not m.document.file_name.endswith('.txt'):
-        bot.reply_to(m, "Я работаю только с .txt файлами, хули.")
-        return
-        
-    if m.document.file_size > 5000000:
-        bot.reply_to(m, "Файл слишком жирный, сука. Дай поменьше.")
+@bot.message_handler(commands=["txt"])
+def gen_txt(m):
+    prompt = m.text.replace("/txt", "").strip()
+    if not prompt:
+        bot.reply_to(m, "А текст где, хули?")
         return
 
-    tmp = bot.reply_to(m, "Читаю файл...")
+    tmp = bot.reply_to(m, "Пишу файл...")
     try:
-        file_info = bot.get_file(m.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        
-        try:
-            content = downloaded_file.decode('utf-8')
-        except UnicodeDecodeError:
-            content = downloaded_file.decode('cp1251')
-
-        prompt = f"Проанализируй этот текст и сделай краткую выжимку:\n\n{content}"
-        
         ans = ask_groq(m.chat.id, prompt)
         
+        file_data = ans.encode('utf-8')
+        doc = io.BytesIO(file_data)
+        doc.name = "response.txt"
+        
         bot.delete_message(m.chat.id, tmp.message_id)
-        for i in range(0, len(ans), 4000):
-            chunk = ans[i:i+4000]
-            bot.send_message(m.chat.id, chunk)
-            
+        bot.send_document(m.chat.id, doc, caption="Держи файл, чурка.")
+        
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
