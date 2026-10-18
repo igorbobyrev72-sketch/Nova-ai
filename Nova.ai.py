@@ -2,7 +2,6 @@ import os
 import threading
 import requests
 import telebot
-import base64
 
 from http.server import (
     BaseHTTPRequestHandler,
@@ -11,11 +10,10 @@ from http.server import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
-VENICE_KEY = os.environ.get("VENICE_KEY")
 MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
-if not BOT_TOKEN or not GROQ_KEY or not VENICE_KEY:
-    msg = "Ошибка: не заданы BOT_TOKEN, GROQ_KEY или VENICE_KEY"
+if not BOT_TOKEN or not GROQ_KEY:
+    msg = "Ошибка: не заданы переменные"
     raise SystemExit(msg)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
@@ -61,40 +59,37 @@ def ask_groq(user_id, text):
 @bot.message_handler(commands=["start"])
 def start(m):
     user_histories[m.chat.id] = []
-    bot.reply_to(m, "Скинь задачу. Если надо картинку — пиши: /img твой запрос")
+    bot.reply_to(m, "Привет. Скинь задачу, текст или .txt файл.")
 
-@bot.message_handler(commands=["img"])
-def gen_img(m):
-    prompt = m.text.replace("/img", "").strip()
-    if not prompt:
-        bot.reply_to(m, "А текст где, хули?")
+@bot.message_handler(content_types=["document"])
+def handle_doc(m):
+    if not m.document.file_name.endswith('.txt'):
+        bot.reply_to(m, "Я работаю только с .txt файлами, хули.")
+        return
+        
+    if m.document.file_size > 5000000:
+        bot.reply_to(m, "Файл слишком жирный, сука. Дай поменьше.")
         return
 
-    tmp = bot.reply_to(m, "Рисую без цензуры...")
+    tmp = bot.reply_to(m, "Читаю файл...")
     try:
-        url = "https://api.venice.ai/api/v1/image/generate"
-        headers = {
-            "Authorization": f"Bearer {VENICE_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": "venice-sd35",
-            "prompt": prompt,
-            "width": 1024,
-            "height": 1024,
-            "safe_mode": False,
-            "format": "png"
-        }
-        r = requests.post(url, headers=headers, json=data, timeout=120)
-        r.raise_for_status()
-        res = r.json()
+        file_info = bot.get_file(m.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        try:
+            content = downloaded_file.decode('utf-8')
+        except UnicodeDecodeError:
+            content = downloaded_file.decode('cp1251')
 
-        img_b64 = res["images"][0]
-        img_data = base64.b64decode(img_b64)
-
+        prompt = f"Проанализируй этот текст и сделай краткую выжимку:\n\n{content}"
+        
+        ans = ask_groq(m.chat.id, prompt)
+        
         bot.delete_message(m.chat.id, tmp.message_id)
-        bot.send_photo(m.chat.id, img_data, caption=f"Запрос: {prompt}")
-
+        for i in range(0, len(ans), 4000):
+            chunk = ans[i:i+4000]
+            bot.send_message(m.chat.id, chunk)
+            
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
