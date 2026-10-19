@@ -4,13 +4,9 @@ import requests
 import telebot
 import io
 import re
-import concurrent.futures
-import platform
-import subprocess
 
 import pandas as pd
 import pdf2docx
-import img2pdf
 from PIL import Image
 from fpdf import FPDF
 
@@ -23,7 +19,7 @@ from http.server import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not BOT_TOKEN or not GROQ_KEY:
     msg = "Ошибка: не заданы переменные"
@@ -32,7 +28,7 @@ if not BOT_TOKEN or not GROQ_KEY:
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 user_histories = {}
 user_models = {}
-deep_mode_enabled = {}
+user_roles = {}
 user_files = {}
 
 class Health(BaseHTTPRequestHandler):
@@ -50,9 +46,9 @@ def run_health():
 
 def get_main_keyboard(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    deep_status = "ВКЛ" if deep_mode_enabled.get(chat_id, False) else "ВЫКЛ"
+    role = user_roles.get(chat_id, "Обычный")
     
-    btn1 = types.KeyboardButton(f"Deep: {deep_status}")
+    btn1 = types.KeyboardButton(f"Роль: {role}")
     btn2 = types.KeyboardButton("Сменить модель")
     btn3 = types.KeyboardButton("Очистить историю")
     
@@ -66,53 +62,107 @@ def is_allowed(m):
         return False
     return True
 
-def call_groq_raw(model, text, sys_prompt="Ты полезный помощник."):
+def ask_groq(user_id, text):
+    history = user_histories.get(user_id, [])
+    history.append({"role": "user", "content": text})
+    
+    if len(history) > 10:
+        history = history[-10:]
+        
+    role = user_roles.get(user_id, "Обычный")
+    if role == "Дебаггер":
+        sys_prompt = "Ты — сеньор-разработчик. Найди ошибку, объясни и выдай исправленный код."
+    else:
+        sys_prompt = "Ты полезный помощник."
+
+    messages = [{"role": "system", "content": sys_prompt}] + history
+    current_model = user_models.get(user_id, MODEL)
+    
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": model, 
-        "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-        "temperature": 0.7
-    }
-    try:
-        r = requests.post(url, headers=headers, json=data, timeout=60)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"Ошибка: {e}"
-
-def deep_ask(user_id, text):
-    models_to_use = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
-    responses = []
+    data = {"model": current_model, "messages": messages}
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(call_groq_raw, model, text) for model in models_to_use]
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if not res.startswith("Ошибка"):
-                responses.append(res)
-                
-    if not responses:
-        return "Все модели обосрались."
-        
-    combined = "\n\n---\n\n".join(responses)
-    judge_prompt = f"Вопрос: {text}\n\nОтветы ИИ:\n{combined}\n\nВыбери лучший ответ, исправь ошибки и выдай ОДИН идеальный вариант."
-    return call_groq_raw("llama-3.3-70b-versatile", judge_prompt, "Ты судья. Выдай лучший ответ.")
+    r = requests.post(url, headers=headers, json=data, timeout=60)
+    r.raise_for_status()
+    ans = r.json()["choices"][0]["message"]["content"]
+    
+    history.append({"role": "assistant", "content": ans})
+    user_histories[user_id] = history
+    return ans
 
 @bot.message_handler(commands=["start"])
 def start(m):
     if not is_allowed(m): return
     user_histories[m.chat.id] = []
-    deep_mode_enabled[m.chat.id] = False
-    bot.reply_to(m, "Здарова. Кидай файлы для конвертации или пиши задачу. Deep-режим делает 3 запроса.", reply_markup=get_main_keyboard(m.chat.id))
+    user_models[m.chat.id] = MODEL
+    user_roles[m.chat.id] = "Обычный"
+    bot.reply_to(m, "Здарова. Кидай файлы для конвертации или пиши задачу.", reply_markup=get_main_keyboard(m.chat.id))
 
-@bot.message_handler(func=lambda message: message.text.startswith("Deep:"))
-def toggle_deep(m):
+@bot.message_handler(func=lambda message: message.text == "Очистить историю")
+def clear_history(m):
     if not is_allowed(m): return
-    current = deep_mode_enabled.get(m.chat.id, False)
-    deep_mode_enabled[m.chat.id] = not current
-    status = "ВКЛ" if not current else "ВЫКЛ"
-    bot.reply_to(m, f"Deep: {status}", reply_markup=get_main_keyboard(m.chat.id))
+    user_histories[m.chat.id] = []
+    bot.reply_to(m, "История очищена.", reply_markup=get_main_keyboard(m.chat.id))
+
+@bot.message_handler(func=lambda message: message.text.startswith("Роль:"))
+def role_menu(m):
+    if not is_allowed(m): return
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Обычный", callback_data="role_Обычный"))
+    markup.add(types.InlineKeyboardButton("Дебаггер", callback_data="role_Дебаггер"))
+    bot.reply_to(m, "Выбери роль:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("role_"))
+def set_role(call):
+    if not is_allowed(call.message): return
+    chosen_role = call.data.replace("role_", "")
+    user_roles[call.message.chat.id] = chosen_role
+    bot.answer_callback_query(call.id, f"Роль: {chosen_role}")
+    bot.edit_message_text(f"Теперь моя роль: *{chosen_role}*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    bot.send_message(call.message.chat.id, "Меню обновлено.", reply_markup=get_main_keyboard(call.message.chat.id))
+
+@bot.message_handler(func=lambda message: message.text == "Сменить модель")
+def model_menu(m):
+    if not is_allowed(m): return
+    
+    tmp = bot.reply_to(m, "Смотрю, какие модели сейчас живы в Groq...")
+    url = "https://api.groq.com/openai/v1/models"
+    headers = {"Authorization": f"Bearer {GROQ_KEY}"}
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        models = r.json().get("data", [])
+        
+        valid_models = []
+        for m_data in models:
+            m_id = m_data["id"]
+            if any(x in m_id for x in ["whisper", "guard", "tts"]):
+                continue
+            valid_models.append(m_id)
+            
+        if not valid_models:
+            bot.edit_message_text("Groq не дал ни одной живой модели.", m.chat.id, tmp.message_id)
+            return
+            
+        valid_models = valid_models[:10]
+        
+        markup = types.InlineKeyboardMarkup()
+        for m_id in valid_models:
+            markup.add(types.InlineKeyboardButton(m_id, callback_data=f"model_{m_id}"))
+            
+        bot.edit_message_text("Выбери модель из тех, что сейчас работают:", m.chat.id, tmp.message_id, reply_markup=markup)
+        
+    except Exception as e:
+        bot.edit_message_text(f"Ошибка при получении моделей: {e}", m.chat.id, tmp.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("model_"))
+def set_model(call):
+    if not is_allowed(call.message): return
+    chosen_model = call.data.replace("model_", "")
+    user_models[call.message.chat.id] = chosen_model
+    bot.answer_callback_query(call.id, f"Модель: {chosen_model}")
+    bot.edit_message_text(f"Теперь я работаю на модели: `{chosen_model}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 @bot.message_handler(content_types=["document"])
 def handle_doc(m):
@@ -212,24 +262,9 @@ def process_conversion(call):
 @bot.message_handler(content_types=["text"])
 def on_text(m):
     if not is_allowed(m): return
-    
-    if deep_mode_enabled.get(m.chat.id, False):
-        tmp = bot.reply_to(m, "Deep-анализ (3 модели)...")
-        try:
-            ans = deep_ask(m.chat.id, m.text)
-            for i in range(0, len(ans), 4000):
-                chunk = ans[i:i+4000]
-                if i == 0:
-                    bot.edit_message_text(chunk, m.chat.id, tmp.message_id)
-                else:
-                    bot.send_message(m.chat.id, chunk)
-        except Exception as e:
-            bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
-        return
-
     tmp = bot.reply_to(m, "Думаю...")
     try:
-        ans = call_groq_raw(MODEL, m.text)
+        ans = ask_groq(m.chat.id, m.text)
         for i in range(0, len(ans), 4000):
             chunk = ans[i:i+4000]
             if i == 0:
