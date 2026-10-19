@@ -20,6 +20,7 @@ from http.server import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
@@ -104,7 +105,7 @@ def start(m):
     user_histories[m.chat.id] = []
     user_models[m.chat.id] = MODEL
     user_roles[m.chat.id] = "Обычный"
-    bot.reply_to(m, "Здарова. Кидай фото задания или файл. Если надо просто текст - пиши.", reply_markup=get_main_keyboard(m.chat.id))
+    bot.reply_to(m, "Здарова. Кидай фото, файлы, пиши текст или юзай /video [промпт].", reply_markup=get_main_keyboard(m.chat.id))
 
 @bot.message_handler(commands=["txt"])
 def gen_txt(m):
@@ -128,6 +129,44 @@ def gen_txt(m):
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
+@bot.message_handler(commands=["video"])
+def gen_video(m):
+    if not is_allowed(m): return
+    if not HF_TOKEN:
+        bot.reply_to(m, "Нет HF_TOKEN в переменных, не могу генерить видео.")
+        return
+        
+    prompt = m.text.replace("/video", "").strip()
+    if not prompt:
+        bot.reply_to(m, "А промпт где, хули?")
+        return
+
+    tmp = bot.reply_to(m, "Генерирую видео... Это займет 2-5 минут. Жди.")
+    
+    API_URL = "https://api-inference.huggingface.co/models/damo-vilab/text-to-video-ms-1.7b"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    
+    try:
+        payload = {"inputs": prompt}
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=300)
+        
+        if response.status_code == 503:
+            est_time = response.json().get("estimated_time", 30)
+            bot.edit_message_text(f"Модель просыпается. Подожди {int(est_time)} сек и попробуй снова.", m.chat.id, tmp.message_id)
+            return
+            
+        response.raise_for_status()
+        
+        video_data = response.content
+        doc = io.BytesIO(video_data)
+        doc.name = "video.mp4"
+        
+        bot.delete_message(m.chat.id, tmp.message_id)
+        bot.send_video(m.chat.id, doc, caption=f"Твой видос: {prompt}")
+        
+    except Exception as e:
+        bot.edit_message_text(f"Ошибка генерации: {e}", m.chat.id, tmp.message_id)
+
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
     if not is_allowed(m): return
@@ -147,22 +186,43 @@ def handle_photo(m):
             "Authorization": f"Bearer {OPENROUTER_KEY}",
             "Content-Type": "application/json"
         }
-        payload = {
-            "model": "google/gemma-4-26b-a4b-it:free",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Выпиши весь текст с этой картинки. Если это задача — выпиши условие."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ]
-        }
         
-        r_vis = requests.post(url, headers=headers, json=payload, timeout=60)
-        r_vis.raise_for_status()
-        task_text = r_vis.json()["choices"][0]["message"]["content"]
+        vision_models = [
+            "google/gemma-4-26b-a4b-it:free",
+            "nvidia/nemotron-nano-12b-v2-vl:free",
+            "qwen/qwen-2-vl-7b-instruct:free"
+        ]
+        
+        task_text = None
+        last_error = ""
+        
+        for model in vision_models:
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Выпиши весь текст с этой картинки. Если это задача — выпиши условие."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                        ]
+                    }
+                ]
+            }
+            
+            try:
+                r_vis = requests.post(url, headers=headers, json=payload, timeout=40)
+                if r_vis.status_code == 200:
+                    task_text = r_vis.json()["choices"][0]["message"]["content"]
+                    break
+                else:
+                    last_error = f"Код {r_vis.status_code}: {r_vis.text[:100]}"
+            except Exception as e:
+                last_error = str(e)
+        
+        if not task_text:
+            bot.edit_message_text(f"Все модели заняты или сдохли. Ошибка: {last_error}", m.chat.id, tmp.message_id)
+            return
         
         bot.edit_message_text(f"Распознал:\n{task_text[:300]}...\n\nРешаю...", m.chat.id, tmp.message_id)
         
