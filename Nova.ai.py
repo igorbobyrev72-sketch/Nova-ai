@@ -4,14 +4,21 @@ import requests
 import telebot
 import io
 import re
+import concurrent.futures
+import platform
+import subprocess
+
+import pandas as pd
+import pdf2docx
+import img2pdf
+from PIL import Image
+from fpdf import FPDF
 
 from telebot import types
 from http.server import (
     BaseHTTPRequestHandler,
     HTTPServer
 )
-from duckduckgo_search import DDGS
-from bs4 import BeautifulSoup
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
@@ -25,8 +32,8 @@ if not BOT_TOKEN or not GROQ_KEY:
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 user_histories = {}
 user_models = {}
-user_roles = {}
-send_code_files = {}
+deep_mode_enabled = {}
+user_files = {}
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -43,14 +50,14 @@ def run_health():
 
 def get_main_keyboard(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    role = user_roles.get(chat_id, "Обычный")
-    file_status = "ВКЛ" if send_code_files.get(chat_id, False) else "ВЫКЛ"
-    btn1 = types.KeyboardButton(f"Роль: {role}")
-    btn2 = types.KeyboardButton(f"Код файлами: {file_status}")
-    btn3 = types.KeyboardButton("Сменить модель")
-    btn4 = types.KeyboardButton("Очистить историю")
+    deep_status = "ВКЛ" if deep_mode_enabled.get(chat_id, False) else "ВЫКЛ"
+    
+    btn1 = types.KeyboardButton(f"Deep: {deep_status}")
+    btn2 = types.KeyboardButton("Сменить модель")
+    btn3 = types.KeyboardButton("Очистить историю")
+    
     markup.add(btn1, btn2)
-    markup.add(btn3, btn4)
+    markup.add(btn3)
     return markup
 
 def is_allowed(m):
@@ -59,222 +66,178 @@ def is_allowed(m):
         return False
     return True
 
-def search_and_fetch(query):
-    try:
-        results = DDGS().text(query, max_results=3, region='ru-ru')
-        context = ""
-        for res in results:
-            url = res.get('href')
-            title = res.get('title')
-            if not url: continue
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                page = requests.get(url, headers=headers, timeout=5)
-                soup = BeautifulSoup(page.text, 'html.parser')
-                for tag in soup(["script", "style", "nav", "footer", "header"]):
-                    tag.decompose()
-                text = soup.get_text(separator=' ', strip=True)
-                context += f"--- {title} ({url}) ---\n{text[:3000]}\n\n"
-            except Exception:
-                pass
-        return context if context else None
-    except Exception as e:
-        print(f"Поиск сдох: {e}")
-        return None
-
-def ask_groq(user_id, text, context=""):
-    history = user_histories.get(user_id, [])
-    
-    if context:
-        prompt = f"Запрос: {text}\n\nКонтекст из интернета:\n{context}\n\nНа основе этого напиши ответ или рабочий код. Без воды."
-        history.append({"role": "user", "content": prompt})
-    else:
-        history.append({"role": "user", "content": text})
-        
-    if len(history) > 10:
-        history = history[-10:]
-        
-    role = user_roles.get(user_id, "Обычный")
-    if role == "Дебаггер":
-        sys_prompt = "Ты — сеньор-разработчик. Найди ошибку, объясни и выдай исправленный код."
-    else:
-        sys_prompt = (
-            "Ты полезный помощник. Отвечай кратко и по делу. "
-            "Если пользователь просит создать файл или спрашивает, умеешь ли ты это делать, "
-            "отвечай, что для создания .txt файла нужно использовать команду /txt [твой текст или тема]. "
-            "Не пиши код в блоке ```, если тебя об этом не просят напрямую!"
-        )
-
-    messages = [{"role": "system", "content": sys_prompt}] + history
-    current_model = user_models.get(user_id, MODEL)
-    
+def call_groq_raw(model, text, sys_prompt="Ты полезный помощник."):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-    data = {"model": current_model, "messages": messages}
-    
-    r = requests.post(url, headers=headers, json=data, timeout=60)
-    r.raise_for_status()
-    ans = r.json()["choices"][0]["message"]["content"]
-    
-    history.append({"role": "assistant", "content": ans})
-    user_histories[user_id] = history
-    return ans
+    data = {
+        "model": model, 
+        "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
+        "temperature": 0.7
+    }
+    try:
+        r = requests.post(url, headers=headers, json=data, timeout=60)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Ошибка: {e}"
 
-def extract_and_send_files(m, text):
-    chat_id = m.chat.id
-    pattern = r"```(\w+)?\n(.*?)```"
-    matches = re.findall(pattern, text, re.DOTALL)
-    if not matches:
-        return False
-    ext_map = {"python": "py", "javascript": "js", "html": "html", "css": "css", "json": "json", "go": "go", "rust": "rs"}
-    sent = False
-    for lang, code in matches:
-        lang = lang.lower() if lang else "txt"
-        ext = ext_map.get(lang, "txt")
-        filename = f"code.{ext}"
-        doc = io.BytesIO(code.strip().encode('utf-8'))
-        doc.name = filename
-        try:
-            bot.send_document(chat_id, doc, caption=f"Файл: {filename}")
-            sent = True
-        except Exception as e:
-            bot.send_message(chat_id, f"Не смог отправить файл: {e}")
-    return sent
+def deep_ask(user_id, text):
+    models_to_use = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
+    responses = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(call_groq_raw, model, text) for model in models_to_use]
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if not res.startswith("Ошибка"):
+                responses.append(res)
+                
+    if not responses:
+        return "Все модели обосрались."
+        
+    combined = "\n\n---\n\n".join(responses)
+    judge_prompt = f"Вопрос: {text}\n\nОтветы ИИ:\n{combined}\n\nВыбери лучший ответ, исправь ошибки и выдай ОДИН идеальный вариант."
+    return call_groq_raw("llama-3.3-70b-versatile", judge_prompt, "Ты судья. Выдай лучший ответ.")
 
 @bot.message_handler(commands=["start"])
 def start(m):
     if not is_allowed(m): return
     user_histories[m.chat.id] = []
-    user_models[m.chat.id] = MODEL
-    send_code_files[m.chat.id] = False
-    user_roles[m.chat.id] = "Обычный"
-    bot.reply_to(m, "Здарова. Скинь задачу или юзай `/web` для поиска в инете.\n\nУмею делать `.txt` файлы через команду `/txt [тема или текст]`.", reply_markup=get_main_keyboard(m.chat.id))
+    deep_mode_enabled[m.chat.id] = False
+    bot.reply_to(m, "Здарова. Кидай файлы для конвертации или пиши задачу. Deep-режим делает 3 запроса.", reply_markup=get_main_keyboard(m.chat.id))
 
-@bot.message_handler(commands=["txt"])
-def gen_txt(m):
+@bot.message_handler(func=lambda message: message.text.startswith("Deep:"))
+def toggle_deep(m):
     if not is_allowed(m): return
-    prompt = m.text.replace("/txt", "").strip()
-    if not prompt:
-        bot.reply_to(m, "А текст или тема где, хули?")
-        return
-
-    tmp = bot.reply_to(m, "Пишу файл...")
-    try:
-        ans = ask_groq(m.chat.id, prompt)
-        file_data = ans.encode('utf-8')
-        doc = io.BytesIO(file_data)
-        doc.name = "response.txt"
-        
-        bot.delete_message(m.chat.id, tmp.message_id)
-        bot.send_document(m.chat.id, doc, caption="Держи файл.")
-    except Exception as e:
-        bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
-
-@bot.message_handler(commands=["web"])
-def web_search(m):
-    if not is_allowed(m): return
-    query = m.text.replace("/web", "").strip()
-    if not query:
-        bot.reply_to(m, "А запрос где?")
-        return
-    tmp = bot.reply_to(m, "Ищу...")
-    
-    context = search_and_fetch(query)
-    if not context:
-        bot.edit_message_text("Поисковик забанил запрос, сука. Попробуй позже или напиши без /web.", m.chat.id, tmp.message_id)
-        return
-    
-    try:
-        ans = ask_groq(m.chat.id, query, context)
-    except Exception as e:
-        bot.edit_message_text(f"Ошибка Groq: {e}", m.chat.id, tmp.message_id)
-        return
-
-    if send_code_files.get(m.chat.id, False):
-        if extract_and_send_files(m, ans):
-            bot.delete_message(m.chat.id, tmp.message_id)
-            return
-
-    for i in range(0, len(ans), 4000):
-        chunk = ans[i:i+4000]
-        if i == 0:
-            try:
-                bot.edit_message_text(chunk, m.chat.id, tmp.message_id)
-            except Exception:
-                bot.send_message(m.chat.id, chunk, reply_markup=get_main_keyboard(m.chat.id))
-        else:
-            bot.send_message(m.chat.id, chunk, reply_markup=get_main_keyboard(m.chat.id))
-
-@bot.message_handler(func=lambda message: message.text.startswith("Роль:"))
-def role_menu(m):
-    if not is_allowed(m): return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Обычный", callback_data="role_Обычный"))
-    markup.add(types.InlineKeyboardButton("Дебаггер", callback_data="role_Дебаггер"))
-    bot.reply_to(m, "Выбери роль:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("role_"))
-def set_role(call):
-    if not is_allowed(call.message): return
-    chosen_role = call.data.replace("role_", "")
-    user_roles[call.message.chat.id] = chosen_role
-    bot.answer_callback_query(call.id, f"Роль: {chosen_role}")
-    bot.edit_message_text(f"Теперь моя роль: *{chosen_role}*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-    bot.send_message(call.message.chat.id, "Меню обновлено.", reply_markup=get_main_keyboard(call.message.chat.id))
-
-@bot.message_handler(func=lambda message: message.text.startswith("Код файлами:"))
-def toggle_files(m):
-    if not is_allowed(m): return
-    current = send_code_files.get(m.chat.id, False)
-    send_code_files[m.chat.id] = not current
+    current = deep_mode_enabled.get(m.chat.id, False)
+    deep_mode_enabled[m.chat.id] = not current
     status = "ВКЛ" if not current else "ВЫКЛ"
-    bot.reply_to(m, f"Отправка кода файлами: {status}", reply_markup=get_main_keyboard(m.chat.id))
+    bot.reply_to(m, f"Deep: {status}", reply_markup=get_main_keyboard(m.chat.id))
 
-@bot.message_handler(func=lambda message: message.text == "Очистить историю")
-def clear_history(m):
+@bot.message_handler(content_types=["document"])
+def handle_doc(m):
     if not is_allowed(m): return
-    user_histories[m.chat.id] = []
-    bot.reply_to(m, "История очищена.", reply_markup=get_main_keyboard(m.chat.id))
-
-@bot.message_handler(func=lambda message: message.text == "Сменить модель")
-def model_menu(m):
-    if not is_allowed(m): return
+    
+    file_name = m.document.file_name
+    ext = file_name.split('.')[-1].lower()
+    file_info = bot.get_file(m.document.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+    
+    user_files[m.chat.id] = {"name": file_name, "data": downloaded, "ext": ext}
+    
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Llama 3.3 70B (Умная)", callback_data="model_llama-3.3-70b-versatile"))
-    markup.add(types.InlineKeyboardButton("GPT-OSS 20B (Быстрая)", callback_data="model_openai/gpt-oss-20b"))
-    markup.add(types.InlineKeyboardButton("Llama 3.1 8B (Слабая)", callback_data="model_llama-3.1-8b-instant"))
-    bot.reply_to(m, "Выбери модель:", reply_markup=markup)
+    if ext == "pdf":
+        markup.add(types.InlineKeyboardButton("В DOCX", callback_data="conv_pdf_docx"))
+    elif ext in ["jpg", "jpeg", "png", "webp"]:
+        markup.add(types.InlineKeyboardButton("В PDF", callback_data="conv_img_pdf"))
+    elif ext == "csv":
+        markup.add(types.InlineKeyboardButton("В Excel (XLSX)", callback_data="conv_csv_xlsx"))
+    elif ext in ["md", "markdown"]:
+        markup.add(types.InlineKeyboardButton("В PDF", callback_data="conv_md_pdf"))
+    elif ext in ["mp3", "ogg", "wav", "m4a"]:
+        markup.add(types.InlineKeyboardButton("В текст (Groq)", callback_data="conv_audio_txt"))
+    else:
+        bot.reply_to(m, f"Формат .{ext} не знаю.")
+        return
+        
+    bot.reply_to(m, f"Файл *{file_name}*. Че делаем?", reply_markup=markup, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("model_"))
-def set_model(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("conv_"))
+def process_conversion(call):
     if not is_allowed(call.message): return
-    chosen_model = call.data.replace("model_", "")
-    user_models[call.message.chat.id] = chosen_model
-    bot.answer_callback_query(call.id, f"Модель: {chosen_model}")
-    bot.edit_message_text(f"Теперь я работаю на модели: `{chosen_model}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    
+    chat_id = call.message.chat.id
+    if chat_id not in user_files:
+        bot.answer_callback_query(call.id, "Файл проебался.")
+        return
+        
+    fd = user_files[chat_id]
+    tmp = bot.send_message(chat_id, "Конвертирую...")
+    
+    try:
+        if call.data == "conv_pdf_docx":
+            docx_path = f"/tmp/{fd['name']}.docx"
+            with open("/tmp/temp.pdf", "wb") as f:
+                f.write(fd["data"])
+            cv = pdf2docx.Converter("/tmp/temp.pdf")
+            cv.convert(docx_path)
+            cv.close()
+            with open(docx_path, "rb") as f:
+                bot.send_document(chat_id, f, caption="Держи DOCX.")
+            os.remove(docx_path)
+            
+        elif call.data == "conv_img_pdf":
+            img = Image.open(io.BytesIO(fd["data"]))
+            pdf_bytes = io.BytesIO()
+            img.convert('RGB').save(pdf_bytes, format='PDF')
+            pdf_bytes.name = "image.pdf"
+            bot.send_document(chat_id, pdf_bytes, caption="Держи PDF.")
+            
+        elif call.data == "conv_csv_xlsx":
+            df = pd.read_csv(io.BytesIO(fd["data"]))
+            xlsx_bytes = io.BytesIO()
+            df.to_excel(xlsx_bytes, index=False)
+            xlsx_bytes.name = "data.xlsx"
+            bot.send_document(chat_id, xlsx_bytes, caption="Держи Excel.")
+            
+        elif call.data == "conv_md_pdf":
+            md_text = fd["data"].decode("utf-8")
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.multi_cell(0, 10, md_text)
+            pdf_bytes = io.BytesIO(pdf.output(dest='S').encode('latin-1'))
+            pdf_bytes.name = "markdown.pdf"
+            bot.send_document(chat_id, pdf_bytes, caption="Держи PDF.")
+            
+        elif call.data == "conv_audio_txt":
+            url = "https://api.groq.com/openai/v1/audio/transcriptions"
+            headers = {"Authorization": f"Bearer {GROQ_KEY}"}
+            files = {"file": (fd["name"], fd["data"])}
+            data = {"model": "whisper-large-v3-turbo"}
+            
+            r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+            r.raise_for_status()
+            text = r.json().get("text", "Пусто.")
+            
+            txt_bytes = io.BytesIO(text.encode('utf-8'))
+            txt_bytes.name = "transcript.txt"
+            bot.send_document(chat_id, txt_bytes, caption="Держи текст.")
+            
+        bot.delete_message(chat_id, tmp.message_id)
+        del user_files[chat_id]
+    except Exception as e:
+        bot.edit_message_text(f"Ошибка: {e}", chat_id, tmp.message_id)
 
 @bot.message_handler(content_types=["text"])
 def on_text(m):
     if not is_allowed(m): return
+    
+    if deep_mode_enabled.get(m.chat.id, False):
+        tmp = bot.reply_to(m, "Deep-анализ (3 модели)...")
+        try:
+            ans = deep_ask(m.chat.id, m.text)
+            for i in range(0, len(ans), 4000):
+                chunk = ans[i:i+4000]
+                if i == 0:
+                    bot.edit_message_text(chunk, m.chat.id, tmp.message_id)
+                else:
+                    bot.send_message(m.chat.id, chunk)
+        except Exception as e:
+            bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
+        return
+
     tmp = bot.reply_to(m, "Думаю...")
     try:
-        ans = ask_groq(m.chat.id, m.text)
+        ans = call_groq_raw(MODEL, m.text)
+        for i in range(0, len(ans), 4000):
+            chunk = ans[i:i+4000]
+            if i == 0:
+                bot.edit_message_text(chunk, m.chat.id, tmp.message_id)
+            else:
+                bot.send_message(m.chat.id, chunk)
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
-        return
-    if send_code_files.get(m.chat.id, False):
-        if extract_and_send_files(m, ans):
-            bot.delete_message(m.chat.id, tmp.message_id)
-            return
-    for i in range(0, len(ans), 4000):
-        chunk = ans[i:i+4000]
-        if i == 0:
-            try:
-                bot.edit_message_text(chunk, m.chat.id, tmp.message_id)
-            except Exception:
-                bot.send_message(m.chat.id, chunk, reply_markup=get_main_keyboard(m.chat.id))
-        else:
-            bot.send_message(m.chat.id, chunk, reply_markup=get_main_keyboard(m.chat.id))
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_health, daemon=True)
