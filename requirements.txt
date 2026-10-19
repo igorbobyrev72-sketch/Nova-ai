@@ -1,4 +1,8 @@
 pyTelegramBotAPI
 requests
-duckduckgo-search
-beautifulsoup4
+pdf2docx
+img2pdf
+Pillow
+pandas
+openpyxl
+fpdf2
