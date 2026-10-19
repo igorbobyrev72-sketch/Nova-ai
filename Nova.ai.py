@@ -148,7 +148,7 @@ def handle_photo(m):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "qwen/qwen-2-vl-72b-instruct:free",
+            "model": "google/gemma-4-26b-a4b-it:free",
             "messages": [
                 {
                     "role": "user",
