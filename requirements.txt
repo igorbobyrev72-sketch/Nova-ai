@@ -1,8 +1,9 @@
 pyTelegramBotAPI
 requests
-pdf2docx
-img2pdf
-Pillow
 pandas
 openpyxl
+pdf2docx
+Pillow
 fpdf2
+PyPDF2
+edge-tts
