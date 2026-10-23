@@ -7,6 +7,7 @@ import io
 import base64
 import asyncio
 import edge_tts
+import time  # Добавлено для пауз в Nova Core Auto
 from PyPDF2 import PdfReader
 import pandas as pd
 import pdf2docx
@@ -245,19 +246,23 @@ def process_auto_task(m):
     conn.commit()
     conn.close()
 
-    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Это займет время.")
+    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Это займет время (Groq любит банить за частые запросы).")
 
     try:
         msg1 = bot.send_message(m.chat.id, "⏳ Шаг 1: Planner составляет план...")
         planner_prompt = AGENT_PROMPTS["planner"]
         plan = ask_groq(m.chat.id, task_text, system_prompt=planner_prompt)
-        bot.edit_message_text(f"✅ План готов:\n\n{plan[:1000]}...\n\nПередаю Builder'у...", m.chat.id, msg1.message_id)
+        bot.edit_message_text(f"✅ План готов.\n\nЖду 5 секунд, чтобы Groq не забанил...\n\nПередаю Builder'у...", m.chat.id, msg1.message_id)
+        
+        time.sleep(5) # Пауза, чтобы Groq не выдал 429
 
         msg2 = bot.send_message(m.chat.id, "⏳ Шаг 2: Builder пишет код...")
         builder_prompt = AGENT_PROMPTS["builder"]
         builder_input = f"Вот задача: {task_text}\n\nВот план действий:\n{plan}\n\nНапиши код по этому плану."
         code_result = ask_groq(m.chat.id, builder_input, system_prompt=builder_prompt)
-        bot.edit_message_text(f"✅ Код написан.\n\nПередаю Checker'у...", m.chat.id, msg2.message_id)
+        bot.edit_message_text(f"✅ Код написан.\n\nЖду 5 секунд...\n\nПередаю Checker'у...", m.chat.id, msg2.message_id)
+        
+        time.sleep(5) # Еще пауза
 
         msg3 = bot.send_message(m.chat.id, "⏳ Шаг 3: Checker проверяет код...")
         checker_prompt = AGENT_PROMPTS["checker"]
@@ -469,13 +474,26 @@ def process_search(m):
     if not is_allowed(m): return
     tmp = bot.reply_to(m, "Ищу в интернете...")
     try:
-        url = "https://searx.be/search"
+        # Сменил инстанс на более стабильный и добавил проверку
+        url = "https://searx.tiekoetter.com/search"
         params = {"q": m.text, "format": "json"}
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
         r = requests.get(url, params=params, headers=headers, timeout=15)
-        r.raise_for_status()
-        results = r.json().get("results", [])[:3]
+        
+        # Если сервер вернул не 200, значит он нас забанил
+        if r.status_code != 200:
+            bot.edit_message_text("Поисковик временно забанил запрос (ошибка сервера). Попробуй через минуту.", m.chat.id, tmp.message_id)
+            return
+            
+        # Пытаемся распарсить JSON
+        try:
+            data = r.json()
+            results = data.get("results", [])[:3]
+        except:
+            # Если пришел не JSON, а HTML (капча)
+            bot.edit_message_text("Поисковик вернул капчу вместо результата. Попробуй позже.", m.chat.id, tmp.message_id)
+            return
         
         if not results:
             bot.edit_message_text("Ничего не нашел.", m.chat.id, tmp.message_id)
