@@ -168,7 +168,7 @@ def ask_groq(user_id, text, system_prompt=None):
     inc_requests(user_id)
     return ans
 
-# --- NOVA CORE ---
+# --- NOVA CORE AUTO ---
 AGENT_PROMPTS = {
     "planner": "Ты — Planner (Планировщик) в системе Nova Core. Твоя задача — взять идею пользователя и разбить её на четкие, пошаговые инструкции. Формат ответа: нумерованный список шагов. Никакой воды.",
     "builder": "Ты — Builder (Разработчик). Твоя задача — написать код или техническое решение по плану. Пиши чистый Python-код. Отвечай без лишних слов, только код.",
@@ -193,23 +193,40 @@ def process_auto_task(m):
     conn.commit()
     conn.close()
 
-    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Из-за лимитов Groq это займет минутку.")
+    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Из-за лимитов Groq это займет несколько минут.")
+
+    def safe_groq(prompt, sys_prompt):
+        # Обрезаем промпт, чтобы не было 413 Payload Too Large
+        safe_prompt = prompt[:4000] 
+        for attempt in range(3):
+            try:
+                return ask_groq(m.chat.id, safe_prompt, system_prompt=sys_prompt)
+            except Exception as e:
+                if "429" in str(e):
+                    bot.send_message(m.chat.id, f"⏳ Groq забанил (429). Жду 60 секунд...")
+                    time.sleep(60)
+                elif "413" in str(e):
+                    bot.send_message(m.chat.id, f"❌ Текст слишком длинный (413). Обрезаю и пробую снова...")
+                    safe_prompt = safe_prompt[:2000] # Режем еще сильнее
+                else:
+                    raise e
+        raise Exception("Groq не отпустил после 3 попыток.")
 
     try:
         msg1 = bot.send_message(m.chat.id, "⏳ Шаг 1: Planner составляет план...")
-        plan = ask_groq(m.chat.id, task_text, system_prompt=AGENT_PROMPTS["planner"])
-        bot.edit_message_text(f"✅ План готов.\n\nЖду 15 секунд, чтобы Groq не забанил...", m.chat.id, msg1.message_id)
+        plan = safe_groq(task_text, AGENT_PROMPTS["planner"])
+        bot.edit_message_text(f"✅ План готов.\n\nЖду 15 секунд...", m.chat.id, msg1.message_id)
         time.sleep(15)
 
         msg2 = bot.send_message(m.chat.id, "⏳ Шаг 2: Builder пишет код...")
-        builder_input = f"Вот задача: {task_text}\n\nВот план действий:\n{plan}\n\nНапиши код по этому плану."
-        code_result = ask_groq(m.chat.id, builder_input, system_prompt=AGENT_PROMPTS["builder"])
+        builder_input = f"Вот задача: {task_text}\n\nВот план действий:\n{plan[:3000]}\n\nНапиши код по этому плану."
+        code_result = safe_groq(builder_input, AGENT_PROMPTS["builder"])
         bot.edit_message_text(f"✅ Код написан.\n\nЖду 15 секунд...", m.chat.id, msg2.message_id)
         time.sleep(15)
 
         msg3 = bot.send_message(m.chat.id, "⏳ Шаг 3: Checker проверяет код...")
-        checker_input = f"Вот задача: {task_text}\n\nВот код:\n{code_result}\n\nПроверь его на ошибки."
-        review = ask_groq(m.chat.id, checker_input, system_prompt=AGENT_PROMPTS["checker"])
+        checker_input = f"Вот задача: {task_text}\n\nВот код:\n{code_result[:3000]}\n\nПроверь его на ошибки."
+        review = safe_groq(checker_input, AGENT_PROMPTS["checker"])
         
         final_result = f"ПЛАН:\n{plan}\n\nКОД:\n{code_result}\n\nРЕВЬЮ:\n{review}"
         conn = sqlite3.connect("bot.db")
@@ -225,10 +242,7 @@ def process_auto_task(m):
             bot.send_message(m.chat.id, final_text[i:i+4000])
 
     except Exception as e:
-        if "429" in str(e):
-            bot.send_message(m.chat.id, "❌ Groq выдал 429 (Too Many Requests). Подожди минутку и запусти `/auto` заново.")
-        else:
-            bot.send_message(m.chat.id, f"❌ Ошибка: {e}")
+        bot.send_message(m.chat.id, f"❌ Ошибка в цепочке: {e}")
 
 @bot.message_handler(commands=["core"])
 def cmd_core(m):
@@ -272,7 +286,7 @@ def handle_core_callback(call):
     bot.edit_message_text(f"⏳ Агент {agent_type.capitalize()} думает...", call.message.chat.id, call.message.message_id)
     
     try:
-        ans = ask_groq(call.message.chat.id, task_text, system_prompt=AGENT_PROMPTS.get(agent_type, "Ты полезный помощник."))
+        ans = ask_groq(call.message.chat.id, task_text[:4000], system_prompt=AGENT_PROMPTS.get(agent_type, "Ты полезный помощник."))
         conn = sqlite3.connect("bot.db")
         c = conn.cursor()
         c.execute("UPDATE core_tasks SET agent_type = ?, result = ?, status = 'done' WHERE id = ?", (agent_type, ans, task_id))
@@ -397,7 +411,7 @@ def process_search(m):
             return
 
         context = "".join(f"Источник: {res.get('title')} ({res.get('url')})\n{res.get('content')}\n\n" for res in results)
-        ans = ask_groq(m.chat.id, f"Ответь на запрос '{m.text}', используя эту инфу:\n\n{context}")
+        ans = ask_groq(m.chat.id, f"Ответь на запрос '{m.text}', используя эту инфу:\n\n{context[:4000]}")
         bot.edit_message_text(ans[:4000], m.chat.id, tmp.message_id)
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
@@ -535,7 +549,7 @@ def handle_doc(m):
             if not text.strip():
                 bot.edit_message_text("Файл пустой.", m.chat.id, tmp.message_id)
                 return
-            ans = ask_groq(m.chat.id, f"Ответь по тексту (или сделай выжимку):\n\n{text[:5000]}")
+            ans = ask_groq(m.chat.id, f"Ответь по тексту (или сделай выжимку):\n\n{text[:4000]}")
             bot.edit_message_text(ans[:4000], m.chat.id, tmp.message_id)
             del user_files[m.chat.id]
         except Exception as e:
