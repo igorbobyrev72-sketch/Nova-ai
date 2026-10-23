@@ -23,7 +23,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b)
+MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 if not BOT_TOKEN or not GROQ_KEY:
     raise SystemExit("Ошибка: не заданы BOT_TOKEN или GROQ_KEY")
