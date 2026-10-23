@@ -7,3 +7,4 @@ Pillow
 fpdf2
 PyPDF2
 edge-tts
+python-pptx
