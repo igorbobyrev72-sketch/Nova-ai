@@ -142,6 +142,28 @@ def get_main_inline_menu():
     markup.add(types.InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings"), types.InlineKeyboardButton("❓ Помощь", callback_data="menu_help"))
     return markup
 
+def send_smart_response(chat_id, text, reply_to_message_id=None):
+    code_blocks = re.findall(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
+    
+    if code_blocks and len(code_blocks[0]) > 500:
+        clean_text = re.sub(r"```(?:python)?\n(.*?)```", "[Код отправлен файлом ниже]", text, flags=re.DOTALL)
+        bot.send_message(chat_id, clean_text[:4000], reply_to_message_id=reply_to_message_id)
+        code_content = "\n\n".join(code_blocks)
+        file_data = code_content.encode('utf-8')
+        doc = io.BytesIO(file_data)
+        doc.name = "nova_code.py"
+        bot.send_document(chat_id, doc, caption="📁 Держи код файлом, чтобы не сломалось форматирование.")
+    elif len(text) > 2000:
+        file_data = text.encode('utf-8')
+        doc = io.BytesIO(file_data)
+        doc.name = "nova_text.txt"
+        bot.send_document(chat_id, doc, caption="📁 Текст слишком длинный для чата, держи файлом.")
+    else:
+        if reply_to_message_id:
+            bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+        else:
+            bot.send_message(chat_id, text)
+
 def ask_groq(user_id, text, system_prompt=None):
     history = get_history(user_id)
     history.append({"role": "user", "content": text})
@@ -156,7 +178,7 @@ def ask_groq(user_id, text, system_prompt=None):
     elif role == "Юморист": sys_prompt = "Ты — веселый юморист. Отвечай с шутками и прибаутками."
     elif role == "Программист": sys_prompt = "Ты — опытный программист. Пиши код и объясняй его."
     elif role == "Дружелюбный": sys_prompt = "Ты — дружелюбный помощник. Общайся тепло и поддерживай."
-    else: sys_prompt = "Ты полезный помощник. Отвечай без Markdown."
+    else: sys_prompt = "Ты — Nova SI, дерзкий, но полезный ИИ-помощник. Не имеешь отношения к OpenAI. Пиши код в тройных кавычках с указанием языка (```python). Общайся по-русски, без Markdown."
 
     messages = [{"role": "system", "content": sys_prompt}] + history
     _, current_model, _ = get_user(user_id)
@@ -656,9 +678,7 @@ def handle_photo(m):
         bot.edit_message_text("Распознал. Решаю...", m.chat.id, tmp.message_id)
         prompt = f"Найди ошибку в решении:\n{task_text}" if find_error_mode.get(m.chat.id) else f"Реши пошагово:\n{task_text}"
         ans = ask_groq(m.chat.id, prompt)
-        for i in range(0, len(ans), 4000):
-            if i == 0: bot.edit_message_text(ans[i:i+4000], m.chat.id, tmp.message_id)
-            else: bot.send_message(m.chat.id, ans[i:i+4000])
+        send_smart_response(m.chat.id, ans)
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
@@ -768,9 +788,8 @@ def on_text(m):
     tmp = bot.reply_to(m, "Думаю...")
     try:
         ans = ask_groq(m.chat.id, m.text)
-        for i in range(0, len(ans), 4000):
-            if i == 0: bot.edit_message_text(ans[i:i+4000], m.chat.id, tmp.message_id)
-            else: bot.send_message(m.chat.id, ans[i:i+4000])
+        bot.delete_message(m.chat.id, tmp.message_id)
+        send_smart_response(m.chat.id, ans)
     except Exception as e:
         bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
