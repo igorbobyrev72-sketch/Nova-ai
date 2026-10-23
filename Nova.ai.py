@@ -196,7 +196,6 @@ def process_auto_task(m):
     bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Из-за лимитов Groq это займет несколько минут.")
 
     def safe_groq(prompt, sys_prompt):
-        # Обрезаем промпт, чтобы не было 413 Payload Too Large
         safe_prompt = prompt[:4000] 
         for attempt in range(3):
             try:
@@ -207,7 +206,7 @@ def process_auto_task(m):
                     time.sleep(60)
                 elif "413" in str(e):
                     bot.send_message(m.chat.id, f"❌ Текст слишком длинный (413). Обрезаю и пробую снова...")
-                    safe_prompt = safe_prompt[:2000] # Режем еще сильнее
+                    safe_prompt = safe_prompt[:2000]
                 else:
                     raise e
         raise Exception("Groq не отпустил после 3 попыток.")
@@ -390,31 +389,49 @@ def search_web(m):
 
 def process_search(m):
     if not is_allowed(m): return
-    tmp = bot.reply_to(m, "Ищу...")
-    try:
-        url = "https://searx.tiekoetter.com/search"
-        params = {"q": m.text, "format": "json"}
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        
-        if r.status_code != 200:
-            bot.edit_message_text("Поисковик забанил запрос. Попробуй через минуту.", m.chat.id, tmp.message_id)
-            return
+    tmp = bot.reply_to(m, "Ищу в интернете...")
+    
+    instances = [
+        "https://searx.tiekoetter.com",
+        "https://searx.be",
+        "https://search.bus-hit.me",
+        "https://searxng.site",
+        "https://priv.au"
+    ]
+    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    results = None
+    
+    for base_url in instances:
         try:
-            results = r.json().get("results", [])[:3]
-        except:
-            bot.edit_message_text("Поисковик вернул капчу. Попробуй позже.", m.chat.id, tmp.message_id)
-            return
-        
-        if not results:
-            bot.edit_message_text("Ничего не нашел.", m.chat.id, tmp.message_id)
-            return
+            url = f"{base_url}/search"
+            params = {"q": m.text, "format": "json"}
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    if data.get("results"):
+                        results = data.get("results", [])[:3]
+                        break 
+                except:
+                    continue 
+        except Exception:
+            continue 
+            
+    if not results:
+        bot.edit_message_text("Все поисковики сейчас перегружены. Попробуй позже.", m.chat.id, tmp.message_id)
+        return
 
-        context = "".join(f"Источник: {res.get('title')} ({res.get('url')})\n{res.get('content')}\n\n" for res in results)
+    context = ""
+    for res in results:
+        context += f"Источник: {res.get('title')} ({res.get('url')})\n{res.get('content')}\n\n"
+        
+    try:
         ans = ask_groq(m.chat.id, f"Ответь на запрос '{m.text}', используя эту инфу:\n\n{context[:4000]}")
         bot.edit_message_text(ans[:4000], m.chat.id, tmp.message_id)
     except Exception as e:
-        bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
+        bot.edit_message_text(f"Ошибка ИИ: {e}", m.chat.id, tmp.message_id)
 
 # --- ОБРАБОТКА ИНЛАЙН ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("menu_"))
