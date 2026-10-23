@@ -8,11 +8,17 @@ import base64
 import asyncio
 import edge_tts
 import time
+import csv
+import re
 from PyPDF2 import PdfReader
 import pandas as pd
 import pdf2docx
 from PIL import Image
 from fpdf import FPDF
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 from telebot import types
 from http.server import (
@@ -168,6 +174,122 @@ def ask_groq(user_id, text, system_prompt=None):
     inc_requests(user_id)
     return ans
 
+# --- ГЕНЕРАТОР ФАЙЛОВ ---
+@bot.message_handler(commands=["file"])
+def file_menu(m):
+    if not is_allowed(m): return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📊 Excel — XLSX", callback_data="filetype_xlsx"),
+        types.InlineKeyboardButton("📽 Презентация — PPTX", callback_data="filetype_pptx"),
+        types.InlineKeyboardButton("📝 Текстовый документ — TXT", callback_data="filetype_txt")
+    )
+    bot.reply_to(m, "📁 Nova File Studio\n\nВыбери формат файла:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("filetype_"))
+def choose_file_type(call):
+    if not is_allowed(call.message):
+        bot.answer_callback_query(call.id, "Нет доступа.")
+        return
+    file_type = call.data.replace("filetype_", "", 1)
+    if file_type not in ("xlsx", "pptx", "txt"):
+        bot.answer_callback_query(call.id, "Неизвестный формат.")
+        return
+    bot.answer_callback_query(call.id)
+    prompt_msg = bot.send_message(
+        call.message.chat.id,
+        "✍️ Опиши, какой файл создать.\n\nНапример: «Таблица расходов за месяц» или «Презентация об искусственном интеллекте»."
+    )
+    bot.register_next_step_handler(prompt_msg, process_file_request, file_type)
+
+def process_file_request(m, file_type):
+    if not is_allowed(m): return
+    if not m.text or not m.text.strip():
+        bot.reply_to(m, "Отправь текстовое описание задачи.")
+        return
+    if len(m.text) > 3000:
+        bot.reply_to(m, "Описание слишком длинное. Сократи его до 3000 символов.")
+        return
+
+    tmp = bot.reply_to(m, "⚙️ Nova создаёт файл...")
+    try:
+        if file_type == "txt":
+            content = ask_groq(
+                m.chat.id,
+                "Создай содержательный текстовый документ по запросу. Используй заголовки и списки, если это уместно. Верни только содержимое документа.\n\n" + m.text,
+                system_prompt="Ты помощник по созданию текстовых документов."
+            )
+            output = io.BytesIO(content.encode("utf-8"))
+            output.name = "nova_document.txt"
+
+        elif file_type == "xlsx":
+            content = ask_groq(
+                m.chat.id,
+                "Создай таблицу по запросу пользователя. Верни ТОЛЬКО CSV с разделителем точка с запятой (;). Первая строка должна содержать названия столбцов. Не добавляй Markdown, пояснения или блоки кода. Каждая строка должна иметь одинаковое число столбцов.\n\n" + m.text,
+                system_prompt="Ты создаёшь аккуратные таблицы для Excel. Возвращай только данные CSV."
+            )
+            content = re.sub(r"^\s*```(?:csv)?\s*|\s*```\s*$", "", content.strip(), flags=re.IGNORECASE)
+            rows = list(csv.reader(io.StringIO(content), delimiter=";"))
+            if not rows or not any(cell.strip() for cell in rows[0]):
+                raise ValueError("ИИ не создал таблицу. Попробуй уточнить запрос.")
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Nova SI"
+            for row in rows: ws.append(row)
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="2457A7")
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for column in ws.columns:
+                letter = column[0].column_letter
+                max_length = max(len(str(cell.value or "")) for cell in column)
+                ws.column_dimensions[letter].width = min(max(max_length + 2, 12), 35)
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+            output.name = "nova_table.xlsx"
+
+        elif file_type == "pptx":
+            content = ask_groq(
+                m.chat.id,
+                "Создай план презентации на 6 слайдов по запросу. Строго соблюдай формат для каждого слайда:\nСЛАЙД: Заголовок\n- Первый тезис\n- Второй тезис\n\nКаждый слайд начинай с новой строки СЛАЙД:. Добавляй 3-5 коротких тезисов на слайд. Не используй Markdown-заголовки и вступления.\n\n" + m.text,
+                system_prompt="Ты профессионально составляешь структуру презентаций."
+            )
+            sections = re.split(r"(?im)^\s*СЛАЙД:\s*", content.strip())
+            prs = Presentation()
+            prs.slide_width = Inches(12)
+            prs.slide_height = Inches(6.75)
+            created = 0
+            for section in sections:
+                lines = [line.strip() for line in section.splitlines() if line.strip()]
+                if not lines: continue
+                title = lines[0][:150]
+                bullets = [line.lstrip("-• ").strip() for line in lines[1:] if line.lstrip().startswith(("-", "•"))]
+                slide = prs.slides.add_slide(prs.slide_layouts[1])
+                slide.shapes.title.text = title
+                slide.placeholders[1].text = ""
+                for bullet in bullets[:7]:
+                    paragraph = slide.placeholders[1].text_frame.add_paragraph()
+                    paragraph.text = bullet
+                    paragraph.level = 0
+                    paragraph.font.size = Pt(20)
+                created += 1
+            if created == 0:
+                slide = prs.slides.add_slide(prs.slide_layouts[1])
+                slide.shapes.title.text = "Nova SI"
+                slide.placeholders[1].text = content[:3000]
+            output = io.BytesIO()
+            prs.save(output)
+            output.seek(0)
+            output.name = "nova_presentation.pptx"
+
+        bot.send_document(m.chat.id, output, caption="✅ Файл создан — Nova SI")
+        bot.delete_message(m.chat.id, tmp.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Не получилось создать файл: {e}", m.chat.id, tmp.message_id)
+
 # --- NOVA CORE AUTO ---
 AGENT_PROMPTS = {
     "planner": "Ты — Planner (Планировщик) в системе Nova Core. Твоя задача — взять идею пользователя и разбить её на четкие, пошаговые инструкции. Формат ответа: нумерованный список шагов. Никакой воды.",
@@ -320,7 +442,8 @@ def cmd_help(m):
         "🖼 Картинки — /image твой_запрос.\n"
         "🎙 Голос — отправь голосовое.\n"
         "🌐 Поиск — кнопка Поиск.\n"
-        "🚀 Nova Core Auto — /auto для запуска цепочки агентов.\n\n"
+        "🚀 Nova Core Auto — /auto для запуска цепочки агентов.\n"
+        "📁 Nova File Studio — /file для создания PPTX, XLSX и TXT.\n\n"
         "Команды:\n/start — Меню\n/clear — Очистить историю\n/profile — Профиль\n/help — Помощь"
     )
     bot.send_message(m.chat.id, help_text)
