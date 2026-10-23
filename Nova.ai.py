@@ -785,13 +785,20 @@ def on_text(m):
     if m.text in ["Очистить историю", "Очистить чат"]: return clear_btn(m)
     if m.text == "Поиск": return search_web(m)
     
+    if len(m.text) > 4000:
+        bot.reply_to(m, "❌ Слишком длинный запрос. Сократи его.")
+        return
+        
     tmp = bot.reply_to(m, "Думаю...")
     try:
         ans = ask_groq(m.chat.id, m.text)
         bot.delete_message(m.chat.id, tmp.message_id)
         send_smart_response(m.chat.id, ans)
     except Exception as e:
-        bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
+        if "413" in str(e):
+            bot.edit_message_text("❌ Текст ответа слишком длинный (413). Попроси что-то покороче.", m.chat.id, tmp.message_id)
+        else:
+            bot.edit_message_text(f"Ошибка: {e}", m.chat.id, tmp.message_id)
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_health, daemon=True)
