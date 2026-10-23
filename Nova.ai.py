@@ -149,12 +149,10 @@ def get_main_keyboard(chat_id):
     btn4 = types.KeyboardButton("Профиль")
     btn5 = types.KeyboardButton("Очистить историю")
     btn6 = types.KeyboardButton("Поиск")
-    btn7 = types.KeyboardButton("Nova Core")
     
     markup.add(btn1, btn2)
     markup.add(btn3, btn4)
     markup.add(btn5, btn6)
-    markup.add(btn7)
     return markup
 
 def get_main_inline_menu():
@@ -229,21 +227,71 @@ AGENT_PROMPTS = {
     )
 }
 
+@bot.message_handler(commands=["auto"])
+def cmd_auto(m):
+    if not is_allowed(m): return
+    msg = bot.reply_to(m, "🚀 Nova Core Auto активирован.\n\nНапиши задачу, и агенты (План -> Код -> Проверка) выполнят её по цепочке:")
+    bot.register_next_step_handler(msg, process_auto_task)
+
+def process_auto_task(m):
+    if not is_allowed(m): return
+    task_text = m.text
+    if not task_text: return
+
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO core_tasks (chat_id, task_text) VALUES (?, ?)", (m.chat.id, task_text))
+    task_id = c.lastrowid
+    conn.commit()
+    conn.close()
+
+    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nЗапускаю цепочку. Это займет время.")
+
+    try:
+        msg1 = bot.send_message(m.chat.id, "⏳ Шаг 1: Planner составляет план...")
+        planner_prompt = AGENT_PROMPTS["planner"]
+        plan = ask_groq(m.chat.id, task_text, system_prompt=planner_prompt)
+        bot.edit_message_text(f"✅ План готов:\n\n{plan[:1000]}...\n\nПередаю Builder'у...", m.chat.id, msg1.message_id)
+
+        msg2 = bot.send_message(m.chat.id, "⏳ Шаг 2: Builder пишет код...")
+        builder_prompt = AGENT_PROMPTS["builder"]
+        builder_input = f"Вот задача: {task_text}\n\nВот план действий:\n{plan}\n\nНапиши код по этому плану."
+        code_result = ask_groq(m.chat.id, builder_input, system_prompt=builder_prompt)
+        bot.edit_message_text(f"✅ Код написан.\n\nПередаю Checker'у...", m.chat.id, msg2.message_id)
+
+        msg3 = bot.send_message(m.chat.id, "⏳ Шаг 3: Checker проверяет код...")
+        checker_prompt = AGENT_PROMPTS["checker"]
+        checker_input = f"Вот задача: {task_text}\n\nВот написанный код:\n{code_result}\n\nПроверь его на ошибки и скажи, всё ли ок."
+        review = ask_groq(m.chat.id, checker_input, system_prompt=checker_prompt)
+        
+        final_result = f"ПЛАН:\n{plan}\n\nКОД:\n{code_result}\n\nРЕВЬЮ:\n{review}"
+        conn = sqlite3.connect("bot.db")
+        c = conn.cursor()
+        c.execute("UPDATE core_tasks SET agent_type = 'auto', result = ?, status = 'done' WHERE id = ?", (final_result, task_id))
+        conn.commit()
+        conn.close()
+
+        bot.edit_message_text(f"✅ Проверка завершена!", m.chat.id, msg3.message_id)
+        
+        final_text = f"🔥 РЕЗУЛЬТАТ NOVA CORE AUTO:\n\n📋 ПЛАН:\n{plan}\n\n💻 КОД:\n{code_result}\n\n🔍 ПРОВЕРКА:\n{review}"
+        
+        for i in range(0, len(final_text), 4000):
+            chunk = final_text[i:i+4000]
+            bot.send_message(m.chat.id, chunk)
+
+    except Exception as e:
+        bot.send_message(m.chat.id, f"❌ Ошибка в цепочке агентов: {e}")
+
 @bot.message_handler(commands=["core"])
 def cmd_core(m):
     if not is_allowed(m): return
     msg = bot.reply_to(m, "🧠 Nova Core активирован.\n\nНапиши задачу, которую нужно решить:")
     bot.register_next_step_handler(msg, process_core_task)
 
-@bot.message_handler(func=lambda message: message.text == "Nova Core")
-def btn_core(m):
-    cmd_core(m)
-
 def process_core_task(m):
     if not is_allowed(m): return
     task_text = m.text
-    if not task_text:
-        return
+    if not task_text: return
         
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
@@ -282,7 +330,6 @@ def handle_core_callback(call):
         return
         
     task_text = row[0]
-    
     bot.edit_message_text(f"⏳ Агент {agent_type.capitalize()} думает...", call.message.chat.id, call.message.message_id)
     
     try:
@@ -335,7 +382,8 @@ def cmd_help(m):
         "🖼 Картинки — команда /image твой_запрос нарисует картинку.\n"
         "🎙 Голос — отправь голосовое, я распознаю и отвечу голосом.\n"
         "🌐 Поиск — команда Поиск найдет инфу в интернете.\n"
-        "🧠 Nova Core — команда /core для запуска агентов.\n\n"
+        "🧠 Nova Core — команда /core для запуска агентов.\n"
+        "🚀 Nova Core Auto — команда /auto для запуска цепочки агентов.\n\n"
         "Команды:\n"
         "/start — Главное меню\n"
         "/clear — Очистить историю диалога\n"
@@ -463,7 +511,7 @@ def handle_menu(call):
         bot.edit_message_text("🧠 Выбери режим работы:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         
     elif data == "menu_history":
-        bot.edit_message_text("📜 История диалогов\n\nПока я помню только последние 10 сообщений. Полноценная история с сохранением в БД появится на следующем этапе.", 
+        bot.edit_message_text("📜 История диалогов\n\nПока я помню только последние 10 сообщений.", 
                               call.message.chat.id, call.message.message_id, reply_markup=get_main_inline_menu())
                               
     elif data == "menu_profile":
@@ -697,7 +745,6 @@ def on_text(m):
     if m.text == "Профиль": return profile_btn(m)
     if m.text in ["Очистить историю", "Очистить чат"]: return clear_btn(m)
     if m.text == "Поиск": return search_web(m)
-    if m.text == "Nova Core": return btn_core(m)
     
     tmp = bot.reply_to(m, "Думаю...")
     try:
