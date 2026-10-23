@@ -53,7 +53,6 @@ def init_db():
         chat_id INTEGER,
         text TEXT
     )''')
-    # Таблица для Nova Core
     c.execute('''CREATE TABLE IF NOT EXISTS core_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER,
@@ -233,7 +232,7 @@ AGENT_PROMPTS = {
 @bot.message_handler(commands=["core"])
 def cmd_core(m):
     if not is_allowed(m): return
-    msg = bot.reply_to(m, "🧠 *Nova Core активирован.*\n\nНапиши задачу, которую нужно решить:", parse_mode="Markdown")
+    msg = bot.reply_to(m, "🧠 Nova Core активирован.\n\nНапиши задачу, которую нужно решить:")
     bot.register_next_step_handler(msg, process_core_task)
 
 @bot.message_handler(func=lambda message: message.text == "Nova Core")
@@ -260,7 +259,7 @@ def process_core_task(m):
     
     markup.add(btn_planner, btn_builder, btn_checker)
     
-    bot.reply_to(m, f"Задача: *{task_text[:50]}...*\n\nВыбери агента для выполнения:", reply_markup=markup, parse_mode="Markdown")
+    bot.reply_to(m, f"Задача: {task_text[:50]}...\n\nВыбери агента для выполнения:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("core_"))
 def handle_core_callback(call):
@@ -284,7 +283,7 @@ def handle_core_callback(call):
         
     task_text = row[0]
     
-    bot.edit_message_text(f"⏳ Агент *{agent_type.capitalize()}* думает...", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    bot.edit_message_text(f"⏳ Агент {agent_type.capitalize()} думает...", call.message.chat.id, call.message.message_id)
     
     try:
         sys_prompt = AGENT_PROMPTS.get(agent_type, "Ты полезный помощник.")
@@ -296,13 +295,13 @@ def handle_core_callback(call):
         conn.commit()
         conn.close()
         
-        full_text = f"🤖 *Ответ от {agent_type.capitalize()}:*\n\n{ans}"
+        full_text = f"🤖 Ответ от {agent_type.capitalize()}:\n\n{ans}"
         for i in range(0, len(full_text), 4000):
             chunk = full_text[i:i+4000]
             if i == 0:
-                bot.edit_message_text(chunk, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+                bot.edit_message_text(chunk, call.message.chat.id, call.message.message_id)
             else:
-                bot.send_message(call.message.chat.id, chunk, parse_mode="Markdown")
+                bot.send_message(call.message.chat.id, chunk)
                 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка Nova Core: {e}", call.message.chat.id, call.message.message_id)
@@ -312,16 +311,15 @@ def handle_core_callback(call):
 def start(m):
     if not is_allowed(m): return
     
-    # Инициализируем юзера в БД, если его нет
     get_user(m.chat.id)
     
     welcome_text = (
-        f"👋 Привет, *{m.from_user.first_name}*!\n\n"
-        "Я — *Nova SI*, твой умный помощник. Могу писать код, тексты, решать задачи и просто общаться.\n\n"
+        f"👋 Привет, {m.from_user.first_name}!\n\n"
+        "Я — Nova SI, твой умный помощник. Могу писать код, тексты, решать задачи и просто общаться.\n\n"
         "Выбери раздел ниже, чтобы начать:"
     )
     
-    bot.send_message(m.chat.id, welcome_text, reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+    bot.send_message(m.chat.id, welcome_text, reply_markup=get_main_inline_menu())
     
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("Очистить чат"), types.KeyboardButton("Сменить модель"))
@@ -331,20 +329,20 @@ def start(m):
 def cmd_help(m):
     if not is_allowed(m): return
     help_text = (
-        "🤖 *Мои возможности:*\n\n"
-        "💬 *ИИ-Чат* — просто пиши мне, и я отвечу.\n"
-        "📎 *Файлы* — кидай PDF, TXT или картинки, я их прочитаю.\n"
-        "🖼 *Картинки* — команда `/image твой_запрос` нарисует картинку.\n"
-        "🎙 *Голос* — отправь голосовое, я распознаю и отвечу голосом.\n"
-        "🌐 *Поиск* — команда `Поиск` найдет инфу в интернете.\n"
-        "🧠 *Nova Core* — команда `/core` для запуска агентов.\n\n"
-        "*Команды:*\n"
+        "🤖 Мои возможности:\n\n"
+        "💬 ИИ-Чат — просто пиши мне, и я отвечу.\n"
+        "📎 Файлы — кидай PDF, TXT или картинки, я их прочитаю.\n"
+        "🖼 Картинки — команда /image твой_запрос нарисует картинку.\n"
+        "🎙 Голос — отправь голосовое, я распознаю и отвечу голосом.\n"
+        "🌐 Поиск — команда Поиск найдет инфу в интернете.\n"
+        "🧠 Nova Core — команда /core для запуска агентов.\n\n"
+        "Команды:\n"
         "/start — Главное меню\n"
         "/clear — Очистить историю диалога\n"
         "/profile — Твой профиль\n"
         "/help — Это сообщение"
     )
-    bot.send_message(m.chat.id, help_text, parse_mode="Markdown")
+    bot.send_message(m.chat.id, help_text)
 
 @bot.message_handler(commands=["clear"])
 def cmd_clear(m):
@@ -452,8 +450,8 @@ def handle_menu(call):
     data = call.data
     
     if data == "menu_chat":
-        bot.edit_message_text("💬 *ИИ-Чат активирован.*\n\nПросто напиши мне свой вопрос в чат, и я отвечу на него, сохраняя контекст диалога.", 
-                              call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=get_main_inline_menu())
+        bot.edit_message_text("💬 ИИ-Чат активирован.\n\nПросто напиши мне свой вопрос в чат, и я отвечу на него, сохраняя контекст диалога.", 
+                              call.message.chat.id, call.message.message_id, reply_markup=get_main_inline_menu())
                               
     elif data == "menu_modes":
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -462,20 +460,20 @@ def handle_menu(call):
             markup.add(types.InlineKeyboardButton(r, callback_data=f"role_{r}"))
         markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="menu_back"))
         
-        bot.edit_message_text("🧠 *Выбери режим работы:*", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text("🧠 Выбери режим работы:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         
     elif data == "menu_history":
-        bot.edit_message_text("📜 *История диалогов*\n\nПока я помню только последние 10 сообщений. Полноценная история с сохранением в БД появится на следующем этапе.", 
-                              call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=get_main_inline_menu())
+        bot.edit_message_text("📜 История диалогов\n\nПока я помню только последние 10 сообщений. Полноценная история с сохранением в БД появится на следующем этапе.", 
+                              call.message.chat.id, call.message.message_id, reply_markup=get_main_inline_menu())
                               
     elif data == "menu_profile":
         role, model, reqs = get_user(call.message.chat.id)
-        text = f"👤 *Твой профиль*\n\nРоль: {role}\nМодель: {model}\nЗапросов: {reqs}"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=get_main_inline_menu())
+        text = f"👤 Твой профиль\n\nРоль: {role}\nМодель: {model}\nЗапросов: {reqs}"
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=get_main_inline_menu())
         
     elif data == "menu_settings":
-        bot.edit_message_text("⚙️ *Настройки*\n\nНастройки контекста и лимиты запросов появятся позже.", 
-                              call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=get_main_inline_menu())
+        bot.edit_message_text("⚙️ Настройки\n\nНастройки контекста и лимиты запросов появятся позже.", 
+                              call.message.chat.id, call.message.message_id, reply_markup=get_main_inline_menu())
                               
     elif data == "menu_help":
         cmd_help(call.message)
