@@ -1,12 +1,10 @@
 pyTelegramBotAPI
 requests
+edge-tts
+PyPDF2
 pandas
 openpyxl
 pdf2docx
 Pillow
 fpdf2
-PyPDF2
-edge-tts
 python-pptx
-imageio-ffmpeg
-yt-dlp
