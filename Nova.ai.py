@@ -321,10 +321,12 @@ def send_smart_response(chat_id, text, reply_to_message_id=None):
 
 def ask_groq(user_id, text, system_prompt=None):
     history = get_history(user_id)
-    history.append({"role": "user", "content": text})
-
-    if len(history) > 10:
-        history = history[-10:]
+    
+    # Обрезаем историю, чтобы не было 413
+    if len(history) > 6:
+        history = history[-6:]
+        
+    history.append({"role": "user", "content": text[:3000]})
 
     role, _, _ = get_user(user_id)
 
@@ -379,7 +381,7 @@ def ask_groq(user_id, text, system_prompt=None):
     if not answer:
         raise ValueError("Модель вернула пустой ответ.")
 
-    add_history(user_id, "user", text)
+    add_history(user_id, "user", text[:3000])
     add_history(user_id, "assistant", answer)
     inc_requests(user_id)
 
@@ -467,10 +469,10 @@ def process_file_request(m, file_type):
         bot.reply_to(m, "Отправь текстовое описание задачи.")
         return
 
-    if len(m.text) > 3000:
+    if len(m.text) > 2000:
         bot.reply_to(
             m,
-            "Описание слишком длинное. Сократи его до 3000 символов."
+            "Описание слишком длинное. Сократи его до 2000 символов."
         )
         return
 
@@ -976,7 +978,7 @@ def process_auto_task(m):
     )
 
     def safe_groq(prompt, sys_prompt):
-        safe_prompt = prompt[:4000]
+        safe_prompt = prompt[:3000]
 
         for attempt in range(3):
             try:
@@ -995,7 +997,7 @@ def process_auto_task(m):
                     time.sleep(30)
 
                 elif "413" in str(e):
-                    safe_prompt = safe_prompt[:2000]
+                    safe_prompt = safe_prompt[:1500]
 
                 else:
                     raise
@@ -1028,7 +1030,7 @@ def process_auto_task(m):
 
         builder_input = (
             f"Задача:\n{task_text}\n\n"
-            f"План:\n{plan[:2500]}\n\n"
+            f"План:\n{plan[:2000]}\n\n"
             "Подготовь решение по этому плану."
         )
 
@@ -1052,7 +1054,7 @@ def process_auto_task(m):
 
         checker_input = (
             f"Задача:\n{task_text}\n\n"
-            f"Решение:\n{code_result[:2500]}\n\n"
+            f"Решение:\n{code_result[:2000]}\n\n"
             "Проверь решение и укажи возможные ошибки."
         )
 
@@ -1228,7 +1230,7 @@ def handle_core_callback(call):
     try:
         answer = ask_groq(
             call.message.chat.id,
-            task_text[:4000],
+            task_text[:3000],
             system_prompt=AGENT_PROMPTS[agent_type]
         )
 
@@ -1591,7 +1593,7 @@ def process_search(m):
                 f"Ответь на запрос: {m.text}\n\n"
                 "Используй информацию из результатов поиска. "
                 "Если данных недостаточно, прямо скажи об этом.\n\n"
-                f"{context[:4000]}"
+                f"{context[:3000]}"
             )
         )
 
@@ -2014,12 +2016,12 @@ def handle_photo(m):
             prompt = (
                 "Найди ошибки в решении, если они есть. "
                 "Объясни исправления:\n\n"
-                + recognized_text[:3500]
+                + recognized_text[:2500]
             )
         else:
             prompt = (
                 "Реши или объясни содержимое изображения пошагово:\n\n"
-                + recognized_text[:3500]
+                + recognized_text[:2500]
             )
 
         answer = ask_groq(m.chat.id, prompt)
@@ -2117,7 +2119,7 @@ def handle_doc(m):
                 (
                     "Проанализируй документ. Дай краткую выжимку "
                     "и ответь по его содержанию:\n\n"
-                    + text[:4000]
+                    + text[:3000]
                 )
             )
 
@@ -2414,10 +2416,10 @@ def on_text(m):
     if m.text == "Поиск":
         return search_web(m)
 
-    if len(m.text) > 4000:
+    if len(m.text) > 3000:
         bot.reply_to(
             m,
-            "❌ Слишком длинный запрос. Сократи его до 4000 символов."
+            "❌ Слишком длинный запрос. Сократи его до 3000 символов."
         )
         return
 
@@ -2476,4 +2478,4 @@ if __name__ == "__main__":
         skip_pending=True,
         timeout=30,
         long_polling_timeout=30
-)
+        )
