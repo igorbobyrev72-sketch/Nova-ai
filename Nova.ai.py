@@ -255,8 +255,15 @@ def cmd_code(m):
     tmp = bot.reply_to(m, "🔎 Получаю Nova.ai.py из GitHub и готовлю изменение...")
     try:
         original, file_sha = github_get_file()
-        if len(original) > 45000: raise RuntimeError("Файл слишком большой для безопасного изменения.")
 
+        # Для /code отправляем полный файл напрямую в API: ask_groq обрезает обычные
+        # сообщения до 3000 символов, что ломало генерацию больших файлов.
+        system_prompt = (
+            "Ты — осторожный Python-разработчик. Верни только корректный JSON "
+            'с полями "content" и "summary". Поле content должно содержать полный '
+            "исходный Python-файл. Не используй Markdown-обёртки. Сохрани все "
+            "функции, которые не нужно менять по заданию. Не добавляй секреты."
+        )
         prompt = (
             "Измени исходный Python-файл по заданию пользователя.\n"
             "Верни ТОЛЬКО корректный JSON без Markdown:\n"
@@ -267,8 +274,24 @@ def cmd_code(m):
             f"ЗАДАНИЕ:\n{task}\n\n"
             f"ТЕКУЩИЙ ФАЙЛ:\n{original}"
         )
-
-        answer = ask_groq(m.chat.id, prompt, system_prompt="Ты — осторожный Python-разработчик. Верни только JSON с полями content и summary. content — полный исходный файл.")
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": get_user(m.chat.id)[1],
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 30000,
+            },
+            timeout=180,
+        )
+        response.raise_for_status()
+        answer = response.json()["choices"][0]["message"]["content"]
+        if not answer:
+            raise ValueError("Модель вернула пустой ответ.")
         
         # Очищаем возможные markdown-обертки от модели
         answer = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*\n?", "", answer)
@@ -316,7 +339,11 @@ def handle_code_confirmation(call):
         bot.answer_callback_query(call.id, "Нет доступа.", show_alert=True)
         return
 
-    action, _, change_id = call.data.split("_", 2)
+    parts = call.data.split("_", 2)
+    if len(parts) != 3:
+        bot.answer_callback_query(call.id, "Некорректная кнопка.", show_alert=True)
+        return
+    action, change_id = parts[1], parts[2]
     change = pending_code_changes.get(change_id)
 
     if not change:
@@ -332,7 +359,7 @@ def handle_code_confirmation(call):
         bot.answer_callback_query(call.id, "Время подтверждения истекло. Запусти /code заново.", show_alert=True)
         return
 
-    if action == "code":
+    if action == "no":
         pending_code_changes.pop(change_id, None)
         bot.answer_callback_query(call.id, "Изменение отменено.")
         bot.edit_message_text("❌ Изменение отменено. GitHub не изменён.", call.message.chat.id, call.message.message_id)
