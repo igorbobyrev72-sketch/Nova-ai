@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import tempfile
 import sqlite3
 import threading
 import requests
@@ -255,15 +258,8 @@ def cmd_code(m):
     tmp = bot.reply_to(m, "🔎 Получаю Nova.ai.py из GitHub и готовлю изменение...")
     try:
         original, file_sha = github_get_file()
+        if len(original) > 45000: raise RuntimeError("Файл слишком большой для безопасного изменения.")
 
-        # Для /code отправляем полный файл напрямую в API: ask_groq обрезает обычные
-        # сообщения до 3000 символов, что ломало генерацию больших файлов.
-        system_prompt = (
-            "Ты — осторожный Python-разработчик. Верни только корректный JSON "
-            'с полями "content" и "summary". Поле content должно содержать полный '
-            "исходный Python-файл. Не используй Markdown-обёртки. Сохрани все "
-            "функции, которые не нужно менять по заданию. Не добавляй секреты."
-        )
         prompt = (
             "Измени исходный Python-файл по заданию пользователя.\n"
             "Верни ТОЛЬКО корректный JSON без Markdown:\n"
@@ -274,24 +270,8 @@ def cmd_code(m):
             f"ЗАДАНИЕ:\n{task}\n\n"
             f"ТЕКУЩИЙ ФАЙЛ:\n{original}"
         )
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": get_user(m.chat.id)[1],
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 30000,
-            },
-            timeout=180,
-        )
-        response.raise_for_status()
-        answer = response.json()["choices"][0]["message"]["content"]
-        if not answer:
-            raise ValueError("Модель вернула пустой ответ.")
+
+        answer = ask_groq(m.chat.id, prompt, system_prompt="Ты — осторожный Python-разработчик. Верни только JSON с полями content и summary. content — полный исходный файл.")
         
         # Очищаем возможные markdown-обертки от модели
         answer = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*\n?", "", answer)
@@ -339,11 +319,7 @@ def handle_code_confirmation(call):
         bot.answer_callback_query(call.id, "Нет доступа.", show_alert=True)
         return
 
-    parts = call.data.split("_", 2)
-    if len(parts) != 3:
-        bot.answer_callback_query(call.id, "Некорректная кнопка.", show_alert=True)
-        return
-    action, change_id = parts[1], parts[2]
+    action, _, change_id = call.data.split("_", 2)
     change = pending_code_changes.get(change_id)
 
     if not change:
@@ -359,7 +335,7 @@ def handle_code_confirmation(call):
         bot.answer_callback_query(call.id, "Время подтверждения истекло. Запусти /code заново.", show_alert=True)
         return
 
-    if action == "no":
+    if action == "code":
         pending_code_changes.pop(change_id, None)
         bot.answer_callback_query(call.id, "Изменение отменено.")
         bot.edit_message_text("❌ Изменение отменено. GitHub не изменён.", call.message.chat.id, call.message.message_id)
@@ -1055,6 +1031,119 @@ def on_text(m):
         else: error_text = f"Ошибка ИИ: {error[:700]}"
         try: bot.edit_message_text(error_text, m.chat.id, tmp.message_id)
         except: bot.send_message(m.chat.id, error_text)
+
+# =========================================================
+# NOVA SI — МОНТАЖ ВИДЕО ПО ОБЫЧНОМУ ОПИСАНИЮ
+# =========================================================
+
+montage_requests = {}
+
+
+def is_montage_request(text):
+    """Лёгкое распознавание запроса на монтаж без slash-команды."""
+    text = (text or "").lower()
+    words = (
+        "монтаж", "смонтируй", "смонтировать", "эдит", "edit",
+        "tiktok", "тикток", "reels", "рилс", "нарежь видео",
+        "сделай клип", "сделай ролик", "переходы", "обработай видео",
+        "обработай ролик", "видео для"
+    )
+    return any(word in text for word in words)
+
+
+@bot.message_handler(content_types=["text"], func=lambda m: bool(m.text) and is_montage_request(m.text))
+def nova_montage_instruction(m):
+    if not is_allowed(m):
+        return
+    montage_requests[m.chat.id] = m.text.strip()[:1500]
+    bot.reply_to(
+        m,
+        "🎬 Задание на монтаж сохранено.\n\n"
+        "Теперь отправь видео как обычное видео в Telegram.\n"
+        "Я применю доступные эффекты по твоему описанию.\n\n"
+        "Поддерживается один ролик до 20 МБ и до 120 секунд."
+    )
+
+
+def _build_montage_filter(instruction):
+    text = instruction.lower()
+    filters = [
+        "scale=720:1280:force_original_aspect_ratio=increase",
+        "crop=720:1280",
+        "fps=30"
+    ]
+    if any(x in text for x in ("чёрно-бел", "черно-бел", "black and white", "black&white")):
+        filters.append("hue=s=0")
+    elif any(x in text for x in ("ярк", "цвет", "cinematic", "кинематограф", "насыщ")):
+        filters.append("eq=contrast=1.10:saturation=1.20:brightness=0.02")
+    if any(x in text for x in ("замедли", "slow motion", "слоумо", "slow-mo")):
+        filters.append("setpts=1.25*PTS")
+    if any(x in text for x in ("ускор", "быстрее", "fast motion")):
+        filters.append("setpts=0.75*PTS")
+    filters.append("format=yuv420p")
+    return ",".join(filters)
+
+
+@bot.message_handler(content_types=["video"])
+def nova_montage_video(m):
+    if not is_allowed(m):
+        return
+    instruction = montage_requests.get(m.chat.id)
+    if not instruction:
+        bot.reply_to(
+            m,
+            "🎬 Сначала напиши, какой монтаж нужен, например: "
+            "«Сделай вертикальный эдит для TikTok, яркие цвета и замедление», "
+            "а потом отправь видео ещё раз."
+        )
+        return
+    if m.video.file_size and m.video.file_size > 20 * 1024 * 1024:
+        bot.reply_to(m, "❌ Видео больше 20 МБ. Отправь ролик меньшего размера.")
+        return
+    if not shutil.which("ffmpeg"):
+        bot.reply_to(m, "❌ На Railway не найден FFmpeg. Проверь nixpacks.toml и пересобери проект.")
+        return
+
+    status = bot.reply_to(m, "🎞️ Nova SI обрабатывает видео. Подожди немного…")
+    try:
+        file_info = bot.get_file(m.video.file_id)
+        video_bytes = bot.download_file(file_info.file_path)
+        with tempfile.TemporaryDirectory(prefix="nova_montage_") as workdir:
+            input_path = os.path.join(workdir, "input.mp4")
+            output_path = os.path.join(workdir, "nova_montage.mp4")
+            with open(input_path, "wb") as f:
+                f.write(video_bytes)
+
+            command = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vf", _build_montage_filter(instruction),
+                "-t", "120", "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+                output_path
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                raise RuntimeError((result.stderr or "FFmpeg error")[-1200:])
+            if os.path.getsize(output_path) > 49 * 1024 * 1024:
+                bot.send_message(m.chat.id, "❌ Результат больше лимита отправки. Попробуй более короткое видео.")
+                return
+            with open(output_path, "rb") as f:
+                bot.send_video(m.chat.id, f, caption="🎬 Готово! Nova SI обработал твой ролик.")
+        montage_requests.pop(m.chat.id, None)
+        try:
+            bot.delete_message(m.chat.id, status.message_id)
+        except Exception:
+            pass
+    except subprocess.TimeoutExpired:
+        bot.reply_to(m, "⏳ Обработка заняла слишком много времени. Попробуй короткий ролик.")
+    except Exception as e:
+        print("Ошибка монтажа:", repr(e))
+        bot.reply_to(m, "❌ Не удалось обработать видео. Проверь логи Railway и попробуй другой ролик.")
+    finally:
+        # Не удаляем задание при технической ошибке: можно повторить отправку видео.
+        pass
+
 
 # =========================================================
 # ЗАПУСК БОТА
